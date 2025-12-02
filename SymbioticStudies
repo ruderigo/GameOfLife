@@ -1,0 +1,668 @@
+<!--
+    PROJECT: SYMBIOTIC ORGANIC ENGINE (PROTOTYPE v2.1)
+    CODENAME: "Eleanor's Garden"
+    
+    [MANIFEST]
+    This prototype implements a "Multi-Species Reaction-Diffusion System" on the GPU.
+    It simulates biological morphogenesis (how patterns form in nature) using the
+    Gray-Scott model. Unlike standard implementations, this version runs TWO
+    independent chemical simulations simultaneously and composites them to create
+    symbiotic relationships (parasitic, mutualistic, or competitive visual effects).
+
+    [MATHEMATICAL CORE]
+    The system solves the following partial differential equations for every pixel:
+    ∂A/∂t = Da * ∇²A - AB² + f(1-A)
+    ∂B/∂t = Db * ∇²B + AB² - (k+f)B
+    
+    Where:
+    - A: The "Food" chemical (Background)
+    - B: The "Cell" chemical (Pattern)
+    - f: Feed Rate (How fast food A is replenished)
+    - k: Kill Rate (How fast cells B die)
+    - ∇²: Laplacian Operator (Diffusion/Neighbor influence)
+
+    [HARDWARE DEPENDENCIES]
+    - WebGL 1.0 or 2.0 (GPU Acceleration required)
+    - OES_texture_float extension (preferred) or standard RGBA8 storage
+    - High-precision fragment shaders
+
+    [ARCHITECTURE]
+    1. STUDIO UI: Flexbox-based sidebar for parameter tuning.
+    2. GPGPU FLUID SOLVER: Uses "Ping-Pong" Framebuffers to solve differential equations.
+    3. COMPOSITOR: Merges the two chemical layers into a final aesthetic output.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Symbiotic Organic Engine | Prototype</title>
+    <style>
+        /* SECTION: STUDIO AESTHETICS 
+           Rationale: Dark mode reduces eye strain during long parameter tuning sessions.
+           The layout is strictly divided into "Controls" (Logic) and "Viewport" (Result).
+        */
+        :root {
+            --bg-color: #050505;
+            --panel-color: #111;
+            --text-color: #aaa;
+            --accent-color: #00ff88;      /* Primary Signal Color */
+            --accent-secondary: #ff0055;  /* Secondary Signal Color */
+            --border-color: #333;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Courier New', Courier, monospace; /* Monospace for technical feel */
+            height: 100vh;
+            display: flex; /* Flexbox for sturdy, responsive layout */
+            overflow: hidden;
+        }
+
+        /* --- STUDIO SIDEBAR --- */
+        #sidebar {
+            width: 300px;
+            background: var(--panel-color);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            box-sizing: border-box;
+            flex-shrink: 0;
+            z-index: 10;
+            overflow-y: auto; /* Allow scrolling if controls overflow */
+        }
+
+        /* --- VIEWPORT (MICROSCOPE) --- */
+        #viewport {
+            flex-grow: 1;
+            position: relative;
+            background: #000;
+            cursor: crosshair; /* Indicates interactive area */
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* --- UI COMPONENTS --- */
+        h1 {
+            font-size: 14px;
+            margin: 0 0 20px 0;
+            color: var(--accent-color);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 11px;
+            color: #fff;
+            margin: 15px 0 10px 0;
+            text-transform: uppercase;
+            opacity: 0.7;
+        }
+
+        /* Visual coding for the two chemical layers */
+        .layer-title { color: var(--accent-color); }
+        .layer-title.secondary { color: var(--accent-secondary); }
+
+        .control-group { margin-bottom: 12px; }
+
+        label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            margin-bottom: 4px;
+        }
+
+        /* Custom Sliders for precision feel */
+        input[type="range"] {
+            width: 100%;
+            background: #222;
+            height: 4px;
+            appearance: none;
+            border-radius: 2px;
+            outline: none;
+        }
+        
+        .slider-primary::-webkit-slider-thumb {
+            appearance: none;
+            width: 10px;
+            height: 10px;
+            background: var(--accent-color);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .slider-secondary::-webkit-slider-thumb {
+            appearance: none;
+            width: 10px;
+            height: 10px;
+            background: var(--accent-secondary);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .presets {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 10px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            background: #1a1a1a;
+            border: 1px solid var(--border-color);
+            color: #ccc;
+            padding: 10px;
+            font-family: inherit;
+            font-size: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-transform: uppercase;
+        }
+
+        button:hover {
+            background: #252525;
+            border-color: #666;
+            color: #fff;
+        }
+
+        .info {
+            font-size: 10px;
+            color: #555;
+            margin-top: auto;
+            border-top: 1px solid var(--border-color);
+            padding-top: 15px;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 
+       INTERFACE LAYER:
+       Provides user control over the simulation constants (Feed, Kill, Diffusion).
+       These values are passed to the GPU every frame via Uniforms.
+    -->
+    <div id="sidebar">
+        <h1>Symbiotic Engine</h1>
+        
+        <div class="presets">
+            <button onclick="setPreset('symbiosis')">Symbiosis</button>
+            <button onclick="setPreset('infection')">Infection</button>
+            <button onclick="setPreset('red_blue')">Red vs Blue</button>
+            <button onclick="setPreset('mitosis')">Mitosis</button>
+        </div>
+
+        <h2 class="layer-title">Layer 1 (Structure)</h2>
+        <div class="control-group">
+            <label>Feed (f): <span id="val-feed1">0.055</span></label>
+            <input type="range" class="slider-primary" id="feed1" min="0.01" max="0.1" step="0.0001">
+        </div>
+        <div class="control-group">
+            <label>Kill (k): <span id="val-kill1">0.062</span></label>
+            <input type="range" class="slider-primary" id="kill1" min="0.045" max="0.07" step="0.0001">
+        </div>
+
+        <h2 class="layer-title secondary">Layer 2 (Energy)</h2>
+        <div class="control-group">
+            <label>Feed (f): <span id="val-feed2">0.055</span></label>
+            <input type="range" class="slider-secondary" id="feed2" min="0.01" max="0.1" step="0.0001">
+        </div>
+        <div class="control-group">
+            <label>Kill (k): <span id="val-kill2">0.062</span></label>
+            <input type="range" class="slider-secondary" id="kill2" min="0.045" max="0.07" step="0.0001">
+        </div>
+
+        <h2 style="margin-top: 20px;">Global Physics</h2>
+        <div class="control-group">
+            <label>Diffusion Speed</label>
+            <input type="range" class="slider-primary" id="diff" min="0.5" max="2.0" step="0.1" value="1.0">
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:10px;">
+            <button style="flex:1" onclick="clearCanvas()">Reset System</button>
+            <button style="flex:1" onclick="randomize()">Inject Noise</button>
+        </div>
+
+        <div class="info">
+            <p><strong>System Status:</strong> GPU Acceleration Active.</p>
+            <p>Two parallel Gray-Scott simulations are running. Layer 1 determines structure, Layer 2 determines energy flow.</p>
+        </div>
+    </div>
+
+    <!-- RENDER LAYER: The WebGL Canvas -->
+    <div id="viewport">
+        <canvas id="glcanvas"></canvas>
+    </div>
+
+    <!-- 
+        SHADER PROGRAMS (GPU KERNELS)
+        This is where the actual math happens. These run on every pixel in parallel.
+    -->
+
+    <!-- Vertex Shader: Simple passthrough for a full-screen quad -->
+    <script id="vs" type="x-shader/x-vertex">
+        attribute vec2 position;
+        void main() {
+            gl_Position = vec4(position, 0.0, 1.0);
+        }
+    </script>
+
+    <!-- 
+        SIMULATION SHADER (The Solver)
+        This shader calculates the next state of the chemical grid.
+        It implements the Laplacian convolution and reaction kinetics.
+    -->
+    <script id="fs-sim" type="x-shader/x-fragment">
+        precision highp float;
+        
+        // --- INPUTS (Uniforms) ---
+        uniform vec2 resolution;    // Canvas size
+        uniform sampler2D texture;  // Previous frame data (Red = Chem A, Green = Chem B)
+        uniform vec2 mouse;         // Mouse position for interaction
+        uniform float mouseDown;    // Interaction trigger
+        
+        // --- PHYSICS CONSTANTS ---
+        uniform float feed;         // Rate of adding Chemical A
+        uniform float kill;         // Rate of removing Chemical B
+        uniform float dt;           // Time step
+        uniform float diffScale;    // Diffusion rate multiplier
+
+        void main() {
+            vec2 uv = gl_FragCoord.xy / resolution;
+            vec2 pixel = 1.0 / resolution;
+
+            // 1. READ CURRENT STATE
+            // We store Chemical A in the Red channel, Chemical B in the Green channel
+            vec4 center = texture2D(texture, uv);
+            float a = center.r;
+            float b = center.g;
+
+            // 2. CONVOLUTION (Laplacian)
+            // We sample the 8 neighbors to see how chemicals spread (Diffusion)
+            // Kernel weights: 
+            // 0.05  0.20  0.05
+            // 0.20  -1.00 0.20
+            // 0.05  0.20  0.05
+            
+            vec4 n = texture2D(texture, uv + vec2(0.0, pixel.y));
+            vec4 s = texture2D(texture, uv + vec2(0.0, -pixel.y));
+            vec4 e = texture2D(texture, uv + vec2(pixel.x, 0.0));
+            vec4 w = texture2D(texture, uv + vec2(-pixel.x, 0.0));
+            
+            vec4 ne = texture2D(texture, uv + vec2(pixel.x, pixel.y));
+            vec4 nw = texture2D(texture, uv + vec2(-pixel.x, pixel.y));
+            vec4 se = texture2D(texture, uv + vec2(pixel.x, -pixel.y));
+            vec4 sw = texture2D(texture, uv + vec2(-pixel.x, -pixel.y));
+
+            float lapA = (0.2 * (n.r + s.r + e.r + w.r) + 0.05 * (ne.r + nw.r + se.r + sw.r) - 1.0 * a);
+            float lapB = (0.2 * (n.g + s.g + e.g + w.g) + 0.05 * (ne.g + nw.g + se.g + sw.g) - 1.0 * b);
+
+            // 3. REACTION KINETICS
+            // The magic formula: A converts to B in the presence of 2B (ABB -> BBB)
+            float reaction = a * b * b;
+            
+            // Calculate change rates
+            float dA = (1.0 * diffScale * lapA - reaction + feed * (1.0 - a));
+            float dB = (0.5 * diffScale * lapB + reaction - (kill + feed) * b);
+
+            // 4. INTEGRATION (Euler method)
+            float nextA = clamp(a + dA * dt, 0.0, 1.0);
+            float nextB = clamp(b + dB * dt, 0.0, 1.0);
+
+            // 5. INTERACTION
+            // Inject Chemical B if mouse is pressed
+            float dist = distance(gl_FragCoord.xy, mouse);
+            if (mouseDown > 0.5 && dist < 30.0) {
+                nextB = 0.9;
+            }
+
+            // Output new state
+            gl_FragColor = vec4(nextA, nextB, 0.0, 1.0);
+        }
+    </script>
+
+    <!-- 
+        RENDER SHADER (The Visualization)
+        This maps the invisible chemical data (0.0 - 1.0) to aesthetic colors.
+        It composites Layer 1 and Layer 2.
+    -->
+    <script id="fs-render" type="x-shader/x-fragment">
+        precision highp float;
+        uniform vec2 resolution;
+        uniform sampler2D layer1; // Structure simulation
+        uniform sampler2D layer2; // Energy simulation
+
+        void main() {
+            vec2 uv = gl_FragCoord.xy / resolution;
+            
+            // Sample both simulations
+            vec4 d1 = texture2D(layer1, uv);
+            vec4 d2 = texture2D(layer2, uv);
+            
+            float v1 = d1.g; // Extract Chemical B from Layer 1
+            float v2 = d2.g; // Extract Chemical B from Layer 2
+            
+            // --- PALETTE: LAYER 1 (Structure) ---
+            // Gradient: Deep Blue -> Teal -> White
+            vec3 col1 = vec3(0.0);
+            if(v1 > 0.1) col1 = mix(vec3(0.0, 0.05, 0.1), vec3(0.0, 0.6, 0.6), (v1 - 0.1) * 3.0);
+            if(v1 > 0.4) col1 = mix(col1, vec3(0.8, 1.0, 0.9), (v1 - 0.4) * 4.0);
+
+            // --- PALETTE: LAYER 2 (Energy) ---
+            // Gradient: Dark Red -> Magenta -> Orange
+            vec3 col2 = vec3(0.0);
+            if(v2 > 0.1) col2 = mix(vec3(0.1, 0.0, 0.05), vec3(0.8, 0.0, 0.4), (v2 - 0.1) * 3.0);
+            if(v2 > 0.4) col2 = mix(col2, vec3(1.0, 0.8, 0.2), (v2 - 0.4) * 4.0);
+            
+            // --- COMPOSITING ---
+            // Screen blending: 1 - (1-A)*(1-B)
+            // This makes the colors add up like light, not like paint.
+            vec3 finalColor = 1.0 - (1.0 - col1) * (1.0 - col2);
+
+            gl_FragColor = vec4(finalColor, 1.0);
+        }
+    </script>
+
+    <!-- APPLICATION LOGIC -->
+    <script>
+        /**
+         * INITIALIZATION & BOILERPLATE
+         * Sets up the WebGL context and handles window resizing.
+         */
+        const canvas = document.getElementById('glcanvas');
+        const container = document.getElementById('viewport');
+        const gl = canvas.getContext('webgl');
+
+        if (!gl) alert("CRITICAL ERROR: WebGL is not supported on this device.");
+
+        // Resizing Logic: Keeps the canvas pixel-perfect within the Flexbox container
+        function resize() {
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            initTextures();
+        }
+        window.addEventListener('resize', resize);
+
+        /**
+         * SHADER COMPILER
+         * Utility functions to compile GLSL code into GPU programs.
+         */
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error("SHADER ERROR:", gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vsSource, fsSource) {
+            const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+            const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+            const program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+            return program;
+        }
+
+        // Compile our programs
+        const vsSource = document.getElementById('vs').text;
+        const fsSimSource = document.getElementById('fs-sim').text;
+        const fsRenderSource = document.getElementById('fs-render').text;
+
+        const simProgram = createProgram(gl, vsSource, fsSimSource);
+        const renderProgram = createProgram(gl, vsSource, fsRenderSource);
+
+        // Define a full-screen quad (two triangles covering the view)
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+            -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
+            -1.0, 1.0, 1.0, -1.0, 1.0, 1.0
+        ]), gl.STATIC_DRAW);
+
+        /**
+         * MEMORY MANAGEMENT (The Ping-Pong Technique)
+         * Rationale: We cannot read from a texture and write to it simultaneously in WebGL.
+         * Solution: We use two textures (A and B).
+         * Frame 1: Read A -> Math -> Write B
+         * Frame 2: Read B -> Math -> Write A
+         */
+        
+        // Layer 1 Memory
+        let l1_texA, l1_texB;
+        let l1_fboA, l1_fboB;
+        // Layer 2 Memory
+        let l2_texA, l2_texB;
+        let l2_fboA, l2_fboB;
+
+        function createTexture() {
+            const tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            // Initialize with null data (GPU allocates memory)
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            
+            // Set linear filtering for smooth organic look
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            return tex;
+        }
+
+        function initTextures() {
+            // Create textures and framebuffers (FBOs)
+            l1_texA = createTexture(); l1_texB = createTexture();
+            l1_fboA = gl.createFramebuffer(); l1_fboB = gl.createFramebuffer();
+            
+            l2_texA = createTexture(); l2_texB = createTexture();
+            l2_fboA = gl.createFramebuffer(); l2_fboB = gl.createFramebuffer();
+
+            // Link textures to framebuffers
+            gl.bindFramebuffer(gl.FRAMEBUFFER, l1_fboA); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, l1_texA, 0);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, l1_fboB); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, l1_texB, 0);
+            
+            gl.bindFramebuffer(gl.FRAMEBUFFER, l2_fboA); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, l2_texA, 0);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, l2_fboB); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, l2_texB, 0);
+
+            clearCanvas();
+        }
+
+        /**
+         * SIMULATION PARAMETERS
+         * These define the "Personality" of the organic system.
+         */
+        const params = {
+            l1: { feed: 0.055, kill: 0.062 }, // Default: Coral
+            l2: { feed: 0.030, kill: 0.058 }, // Default: Spots
+            diff: 1.0
+        };
+
+        // Interaction State
+        let mouseX = 0, mouseY = 0, mouseDown = 0;
+
+        function updateMouse(e) {
+            const rect = canvas.getBoundingClientRect();
+            // Handle both touch and mouse events
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            mouseX = clientX - rect.left;
+            mouseY = canvas.height - (clientY - rect.top); // Invert Y for WebGL coord system
+        }
+
+        canvas.addEventListener('mousemove', updateMouse);
+        canvas.addEventListener('mousedown', e => { mouseDown = 1; updateMouse(e); });
+        canvas.addEventListener('mouseup', () => mouseDown = 0);
+        canvas.addEventListener('touchstart', e => { mouseDown = 1; updateMouse(e); });
+        canvas.addEventListener('touchend', () => mouseDown = 0);
+        canvas.addEventListener('touchmove', updateMouse);
+
+        /**
+         * UI BINDING
+         * Connects HTML sliders to the JS simulation parameters.
+         */
+        function bindSlider(id, targetObj, key, displayId) {
+            const el = document.getElementById(id);
+            const disp = document.getElementById(displayId);
+            el.value = targetObj[key];
+            el.addEventListener('input', e => {
+                targetObj[key] = parseFloat(e.target.value);
+                disp.innerText = targetObj[key].toFixed(4);
+            });
+            // Returns a function to programmatically update the slider (for presets)
+            return (val) => {
+                targetObj[key] = val;
+                el.value = val;
+                disp.innerText = val.toFixed(4);
+            }
+        }
+
+        const updateL1Feed = bindSlider('feed1', params.l1, 'feed', 'val-feed1');
+        const updateL1Kill = bindSlider('kill1', params.l1, 'kill', 'val-kill1');
+        const updateL2Feed = bindSlider('feed2', params.l2, 'feed', 'val-feed2');
+        const updateL2Kill = bindSlider('kill2', params.l2, 'kill', 'val-kill2');
+        const updateDiff = bindSlider('diff', params, 'diff', 'val-diff');
+
+        /**
+         * PRESETS
+         * Known "Sweet Spots" in the chaotic phase space of Reaction-Diffusion.
+         */
+        window.setPreset = (type) => {
+            console.log("Loading Preset:", type);
+            switch(type) {
+                case 'symbiosis':
+                    // Complex interplay: Stripes vs Spots
+                    updateL1Feed(0.0545); updateL1Kill(0.0620);
+                    updateL2Feed(0.0290); updateL2Kill(0.0570);
+                    break;
+                case 'infection':
+                    // Stable host vs Chaotic parasite
+                    updateL1Feed(0.0250); updateL1Kill(0.0600);
+                    updateL2Feed(0.0820); updateL2Kill(0.0600);
+                    break;
+                case 'red_blue':
+                    // Competitive Mitosis
+                    updateL1Feed(0.0300); updateL1Kill(0.0620);
+                    updateL2Feed(0.0340); updateL2Kill(0.0618);
+                    break;
+                case 'mitosis':
+                    // Pure cell division
+                    updateL1Feed(0.0300); updateL1Kill(0.0620);
+                    updateL2Feed(0.0300); updateL2Kill(0.0620);
+                    break;
+            }
+            window.randomize();
+        };
+
+        window.clearCanvas = () => {
+            // Reset all chemicals to Red=1.0 (Food), Green=0.0 (Life)
+            [l1_fboA, l1_fboB, l2_fboA, l2_fboB].forEach(fbo => {
+                gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+                gl.clearColor(1.0, 0.0, 0.0, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+            });
+        };
+
+        window.randomize = () => {
+            window.clearCanvas();
+            // TODO: Implement Perlin Noise seeding shader for advanced randomization
+        };
+
+        /**
+         * SIMULATION LOOP
+         * The heartbeat of the engine.
+         */
+        function runSim(texRead, fboWrite, feed, kill) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fboWrite);
+            gl.useProgram(simProgram);
+            
+            // Set Attributes
+            const positionLoc = gl.getAttribLocation(simProgram, "position");
+            gl.enableVertexAttribArray(positionLoc);
+            gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+
+            // Set Uniforms (Feed/Kill rates are crucial here)
+            gl.uniform2f(gl.getUniformLocation(simProgram, "resolution"), canvas.width, canvas.height);
+            gl.uniform1i(gl.getUniformLocation(simProgram, "texture"), 0);
+            gl.uniform2f(gl.getUniformLocation(simProgram, "mouse"), mouseX, mouseY);
+            gl.uniform1f(gl.getUniformLocation(simProgram, "mouseDown"), mouseDown);
+            gl.uniform1f(gl.getUniformLocation(simProgram, "feed"), feed);
+            gl.uniform1f(gl.getUniformLocation(simProgram, "kill"), kill);
+            gl.uniform1f(gl.getUniformLocation(simProgram, "diffScale"), params.diff);
+            gl.uniform1f(gl.getUniformLocation(simProgram, "dt"), 1.0); // Time delta
+
+            // Bind previous frame
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, texRead);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        function render() {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Null = Screen
+            gl.useProgram(renderProgram);
+
+            const positionLoc = gl.getAttribLocation(renderProgram, "position");
+            gl.enableVertexAttribArray(positionLoc);
+            gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.uniform2f(gl.getUniformLocation(renderProgram, "resolution"), canvas.width, canvas.height);
+            
+            // Pass both simulation layers to the compositor
+            gl.uniform1i(gl.getUniformLocation(renderProgram, "layer1"), 0);
+            gl.uniform1i(gl.getUniformLocation(renderProgram, "layer2"), 1);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, l1_texA); 
+            
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, l2_texA);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        function loop() {
+            // Speed Trick: Run multiple simulation steps per render frame.
+            // Reaction-diffusion requires many small steps to remain stable but look fast.
+            for (let i = 0; i < 8; i++) {
+                // --- LAYER 1 STEP ---
+                runSim(l1_texA, l1_fboB, params.l1.feed, params.l1.kill);
+                // Ping-Pong Swap
+                let tempT = l1_texA; l1_texA = l1_texB; l1_texB = tempT;
+                let tempF = l1_fboA; l1_fboA = l1_fboB; l1_fboB = tempF;
+
+                // --- LAYER 2 STEP ---
+                runSim(l2_texA, l2_fboB, params.l2.feed, params.l2.kill);
+                // Ping-Pong Swap
+                tempT = l2_texA; l2_texA = l2_texB; l2_texB = tempT;
+                tempF = l2_fboA; l2_fboA = l2_fboB; l2_fboB = tempF;
+            }
+
+            render();
+            requestAnimationFrame(loop);
+        }
+
+        // Boot Sequence
+        resize();
+        setPreset('symbiosis'); // Start with a visually interesting state
+        loop();
+
+    </script>
+</body>
+</html>
+
+
